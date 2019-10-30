@@ -1,0 +1,3 @@
+%{
+  "bbmustache": {:hex, :bbmustache, "1.4.0", "cc45a071dd2b3df3a3e5f28548c8167e669a1f53437a2a2fd3b378cd38a6e725", [:rebar3], [], "hexpm"},
+}
