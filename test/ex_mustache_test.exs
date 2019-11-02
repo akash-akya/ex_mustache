@@ -8,15 +8,26 @@ defmodule ExMustacheTest do
       ExMustache.tokenize("Name {{   }}")
     end)
 
+    template = ~s"""
+    Test:
+    {{#product}}
+
+     {{name}}
+
+    {{/product}}
+    """
+
     assert [
-             "Test: \n",
+             "Test:",
+             "\n",
              {:block, ["product"]},
-             "\n\n ",
+             "\n",
+             " ",
              {:variable, ["name"]},
-             "\n\n ",
-             {:block_close, ["product"]},
-             ""
-           ] == ExMustache.tokenize("Test: \n{{#product}}\n\n {{name}}\n\n {{/product}}")
+             "\n",
+             "\n",
+             {:block_close, ["product"]}
+           ] == ExMustache.tokenize(template)
   end
 
   test "parser" do
@@ -27,8 +38,7 @@ defmodule ExMustacheTest do
 
     assert [
              "Test: ",
-             {:block, ["product"], [" ", {:variable, ["name"]}, " "]},
-             ""
+             {:block, ["product"], [" ", {:variable, ["name"]}, " "]}
            ] == ExMustache.parse(template)
   end
 
@@ -63,7 +73,7 @@ defmodule ExMustacheTest do
       template = ~s"""
       Hello {{ name }}!
       {{#dummy}}
-      {{ #movies }}
+      x   {{ #movies }}  x
         Movies:
           Watched:
           {{ #watched }}
@@ -97,7 +107,7 @@ defmodule ExMustacheTest do
       {{#dummy}}
         {{ #test }}
           {{ #movies }}
-            - {{ dummy.movies.name }}
+            - {{ dummy..name }}
           {{ /movies }}
         {{ /test }}
       {{/dummy}}
@@ -124,6 +134,34 @@ defmodule ExMustacheTest do
       ExMustache.render(template, data)
       |> IO.iodata_to_binary()
       |> IO.puts()
+    end
+
+    test "mustache" do
+      template = ~s"""
+      Test:
+      {{#product}}
+
+       {{name}}
+
+      {{/product}}
+      """
+
+      data = %{
+        "product" => %{
+          "name" => "abcd"
+        }
+      }
+
+      mu = :bbmustache.render(template, data, key_type: :binary)
+
+      mymu =
+        ExMustache.tokenize(template)
+        |> ExMustache.parse()
+        |> ExMustache.create_template_func()
+        |> ExMustache.render(data)
+        |> IO.iodata_to_binary()
+
+      assert mu == mymu
     end
   end
 end
