@@ -6,12 +6,12 @@ defmodule ExMustache.SpecTest do
   test "run" do
     Path.wildcard("#{@spec_path}/*.yml")
     |> Enum.reject(fn f ->
-      Enum.any?(["lambda", "delimiter", "partials"], fn ignored ->
+      Enum.any?(["lambda"], fn ignored ->
         String.contains?(f, ignored)
       end)
     end)
     |> Enum.each(fn path ->
-      IO.puts("testing #{path}")
+      IO.puts("\n=> #{path}")
 
       YamlElixir.read_from_file!(path)
       |> run_spec()
@@ -23,13 +23,13 @@ defmodule ExMustache.SpecTest do
   end
 
   defp assert_test(test) do
-    IO.puts(test["desc"])
+    IO.puts(" " <> test["desc"])
 
     result =
       ExMustache.tokenize(test["template"])
       |> ExMustache.parse()
       |> ExMustache.create_template_func()
-      |> ExMustache.render(test["data"])
+      |> ExMustache.render(test["data"], test["partials"], [])
       |> IO.iodata_to_binary()
 
     assert test["expected"] == result
