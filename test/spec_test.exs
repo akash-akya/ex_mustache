@@ -28,7 +28,6 @@ defmodule ExMustache.SpecTest do
     result =
       ExMustache.tokenize(test["template"])
       |> ExMustache.parse()
-      |> ExMustache.create_template_func()
       |> ExMustache.render(test["data"], test["partials"], [])
       |> IO.iodata_to_binary()
 

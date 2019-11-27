@@ -133,8 +133,8 @@ defmodule ExMustache do
                     |> update_partial()
                     |> cleanup_line()
                   else
-                    cleanup_line(line)
-                    |> reverse()
+                    reverse(line)
+                    |> cleanup_line()
                   end
 
                 {[], true, [line | result]}
@@ -150,8 +150,8 @@ defmodule ExMustache do
                     |> update_partial()
                     |> cleanup_line()
                   else
-                    cleanup_line(line)
-                    |> reverse()
+                    reverse(line)
+                    |> cleanup_line()
                   end
 
                 {[], true, [line | result]}
@@ -218,7 +218,23 @@ defmodule ExMustache do
   # parser
   def parse(template) do
     dispatch(template, [], [])
-    |> Enum.reverse()
+    |> merge_strings()
+  end
+
+  defp merge_strings(template) do
+    Enum.reduce(template, [], fn
+      item, [prev | acc] when is_binary(item) and is_binary(prev) ->
+        [item <> prev | acc]
+
+      {:block, field}, acc ->
+        [{:block, merge_strings(field)} | acc]
+
+      {:neg_block, field}, acc ->
+        [{:neg_block, merge_strings(field)} | acc]
+
+      item, acc ->
+        [item | acc]
+    end)
   end
 
   defp dispatch([], acc, _context), do: acc
@@ -263,103 +279,84 @@ defmodule ExMustache do
 
   # template function
 
-  def create_template_func(template) do
-    Enum.map(template, fn t ->
-      case t do
-        {:block, var, block} ->
-          create_block_callback(var, block)
+  defp render_item(item, data, partials, context) do
+    case item do
+      {:block, var, block} ->
+        handle_block(var, block, data, partials, context)
 
-        {:neg_block, var, block} ->
-          create_neg_block_callback(var, block)
+      {:neg_block, var, block} ->
+        handle_neg_block(var, block, data, partials, context)
 
-        {:variable, var} ->
-          fn data, context, _partials ->
-            fetch_value(data, var, context)
-            |> serialize()
-            |> html_escape()
+      {:variable, var} ->
+        fetch_value(data, var, context)
+        |> serialize()
+        |> html_escape()
+
+      {:partial, [field], indent} ->
+        template =
+          Map.get(partials, field, "")
+          |> ExMustache.tokenize()
+
+        template =
+          if indent != "" do
+            {_, template} =
+              Enum.reduce(template, {true, []}, fn term, {newline?, acc} ->
+                acc =
+                  if newline? do
+                    [term | [indent | acc]]
+                  else
+                    [term | acc]
+                  end
+
+                newline? =
+                  case term do
+                    "\n" <> _ -> true
+                    _ -> false
+                  end
+
+                {newline?, acc}
+              end)
+
+            Enum.reverse(template)
+          else
+            template
           end
 
-        {:partial, [field], indent} ->
-          fn data, context, partials ->
-            template =
-              Map.get(partials, field, "")
-              |> ExMustache.tokenize()
+        partial = template |> ExMustache.parse()
 
-            template =
-              if indent != "" do
-                {_, template} =
-                  Enum.reduce(template, {true, []}, fn term, {newline?, acc} ->
-                    acc =
-                      if newline? do
-                        [term | [indent | acc]]
-                      else
-                        [term | acc]
-                      end
+        rendered =
+          ExMustache.render(partial, data, partials, context)
+          |> IO.iodata_to_binary()
 
-                    newline? =
-                      case term do
-                        "\n" <> _ -> true
-                        _ -> false
-                      end
+      {:unescape, var} ->
+        fetch_value(data, var, context) |> serialize()
 
-                    {newline?, acc}
-                  end)
-
-                Enum.reverse(template)
-              else
-                template
-              end
-
-            partial =
-              template
-              |> ExMustache.parse()
-              |> ExMustache.create_template_func()
-
-            rendered =
-              ExMustache.render(partial, data, partials, context)
-              |> IO.iodata_to_binary()
-          end
-
-        {:unescape, var} ->
-          fn data, context, _partials ->
-            fetch_value(data, var, context) |> serialize()
-          end
-
-        term when is_binary(term) ->
-          fn _data, _context, _partials -> term end
-      end
-    end)
-  end
-
-  defp create_block_callback(keys, block) do
-    block_callback = create_template_func(block)
-
-    fn data, context, partials ->
-      value = fetch_value(data, keys, context)
-
-      case value do
-        value when is_map(value) -> render(block_callback, value, partials, [data | context])
-        [_ | _] -> Enum.map(value, &render(block_callback, &1, partials, [data | context]))
-        [] -> []
-        false -> []
-        nil -> []
-        _ -> render(block_callback, data, partials, context)
-      end
+      term when is_binary(term) ->
+        term
     end
   end
 
-  defp create_neg_block_callback(keys, block) do
-    block_callback = create_template_func(block)
+  defp handle_block(keys, block, data, partials, context) do
+    value = fetch_value(data, keys, context)
 
-    fn data, context, partials ->
-      value = fetch_value(data, keys, context)
+    case value do
+      value when is_map(value) -> render(block, value, partials, [data | context])
+      [_ | _] -> Enum.map(value, &render(block, &1, partials, [data | context]))
+      [] -> []
+      false -> []
+      nil -> []
+      _ -> render(block, data, partials, context)
+    end
+  end
 
-      case value do
-        [] -> render(block_callback, data, partials, context)
-        false -> render(block_callback, data, partials, context)
-        nil -> render(block_callback, data, partials, context)
-        _ -> []
-      end
+  defp handle_neg_block(keys, block, data, partials, context) do
+    value = fetch_value(data, keys, context)
+
+    case value do
+      [] -> render(block, data, partials, context)
+      false -> render(block, data, partials, context)
+      nil -> render(block, data, partials, context)
+      _ -> []
     end
   end
 
@@ -404,8 +401,8 @@ defmodule ExMustache do
   # render
 
   def render(template, data, partials, context) do
-    Enum.map(template, fn callback ->
-      callback.(data, context, partials)
+    Enum.map(template, fn entity ->
+      render_item(entity, data, partials, context)
     end)
   end
 end
