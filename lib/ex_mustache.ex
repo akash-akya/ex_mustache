@@ -1,50 +1,101 @@
 defmodule ExMustache do
   defmodule TokenizeState do
-    defstruct [:match_pattern, :close_pattern]
+    defstruct [:match_pattern, :close_pattern, :partials, :result]
   end
 
-  def tokenize(template) do
+  def parse(template) do
+    {template, partials} = parse_template(template)
+    {merge_strings(template), parse_partials(MapSet.to_list(partials), ".")}
+  end
+
+  defp parse_partials(partials, path, parsed \\ %{})
+  defp parse_partials([], _path, parsed), do: parsed
+
+  defp parse_partials([name | rest], path, parsed) do
+    if Map.has_key?(parsed, name) do
+      parse_partials(rest, path, parsed)
+    else
+      {template, new_partials} = parse_template(read_template_file(name, path))
+      template = deep_reverse(template)
+      parse_partials(rest ++ MapSet.to_list(new_partials), path, Map.put(parsed, name, template))
+    end
+  end
+
+  defp deep_reverse(template, result \\ [])
+  defp deep_reverse([], result), do: result
+
+  defp deep_reverse([term | template], result) when is_list(term) do
+    deep_reverse(template, [deep_reverse(term) | result])
+  end
+
+  defp deep_reverse([term | template], result) do
+    deep_reverse(template, [term | result])
+  end
+
+  defp read_template_file(name, _dir) do
+    case File.read(name <> ".mustache") do
+      {:ok, content} -> content
+      {:error, :enoent} -> ""
+    end
+  end
+
+  defp parse_template(template) do
     state = %TokenizeState{
       match_pattern: :binary.compile_pattern(["\n", "{{"]),
-      close_pattern: :binary.compile_pattern(["}}"])
+      close_pattern: :binary.compile_pattern(["}}"]),
+      result: [],
+      partials: MapSet.new()
     }
 
-    template = do_tokenize(template, [], state)
+    %TokenizeState{result: template, partials: partials} = tokenize(template, state)
 
-    Enum.reverse([:end | template])
-    |> chomp_newlines()
+    template =
+      Enum.reverse([:end | template])
+      |> chomp_newlines()
+      |> dispatch([], [])
+
+    {template, partials}
   end
 
-  def do_tokenize(template, result, state) do
+  defp tokenize(template, state) do
     case split_string(template, state.match_pattern) do
       {:newline, left, rest} ->
-        do_tokenize(rest, [:newline | append(left, result)], state)
+        tokenize(rest, %TokenizeState{state | result: [:newline | append(left, state.result)]})
 
       {:tag, left, rest} ->
         case tag_close(rest, state.close_pattern) do
           {pos, length} ->
             {interp, rest} = :erlang.split_binary(rest, pos)
             rest = binary_part(rest, length, byte_size(rest) - length)
+            tag = tag(String.trim(interp))
 
-            case tag(String.trim(interp)) do
-              {:delimiter, {start_delim, close_delim}} = tag ->
-                state = %TokenizeState{
-                  match_pattern: :binary.compile_pattern(["\n", start_delim]),
-                  close_pattern: :binary.compile_pattern([close_delim])
-                }
+            state =
+              case tag do
+                {:delimiter, {start_delim, close_delim}} ->
+                  %TokenizeState{
+                    state
+                    | match_pattern: :binary.compile_pattern(["\n", start_delim]),
+                      close_pattern: :binary.compile_pattern([close_delim])
+                  }
 
-                do_tokenize(rest, [tag | append(left, result)], state)
+                {:partial, name} ->
+                  %TokenizeState{state | partials: MapSet.put(state.partials, name)}
 
-              tag ->
-                do_tokenize(rest, [tag | append(left, result)], state)
-            end
+                _ ->
+                  state
+              end
+
+            tokenize(
+              rest,
+              %TokenizeState{state | result: [tag | append(left, state.result)]}
+            )
 
           :nomatch ->
             raise "Parsing Error. missing END tag. left: #{left} template: #{template}"
         end
 
       :nomatch ->
-        append(template, result)
+        %TokenizeState{state | result: append(template, state.result)}
     end
   end
 
@@ -81,7 +132,7 @@ defmodule ExMustache do
       "#" <> field -> {:block, split_to_keys(field)}
       "^" <> field -> {:neg_block, split_to_keys(field)}
       "/" <> field -> {:block_close, split_to_keys(field)}
-      ">" <> field -> {:partial, split_to_keys(field)}
+      ">" <> field -> {:partial, String.trim(field)}
       "!" <> field -> {:comment, field}
       "&" <> field -> {:unescape, split_to_keys(field)}
       "=" <> field -> {:delimiter, find_delimiters(field)}
@@ -127,7 +178,7 @@ defmodule ExMustache do
     |> String.split(".")
   end
 
-  def chomp_newlines(template) do
+  defp chomp_newlines(template) do
     {[], true, result} =
       Enum.reduce(
         template,
@@ -224,12 +275,6 @@ defmodule ExMustache do
     Enum.reject(line, &is_binary/1)
   end
 
-  # parser
-  def parse(template) do
-    dispatch(template, [], [])
-    |> merge_strings()
-  end
-
   defp merge_strings(template) do
     Enum.reduce(template, [], fn
       item, [prev | acc] when is_binary(item) and is_binary(prev) ->
@@ -246,6 +291,7 @@ defmodule ExMustache do
     end)
   end
 
+  # parser
   defp dispatch([], acc, _context), do: acc
 
   defp dispatch([term | template], acc, context) when is_binary(term) do
@@ -301,41 +347,25 @@ defmodule ExMustache do
         |> serialize()
         |> html_escape()
 
-      {:partial, [field], indent} ->
-        template =
-          Map.get(partials, field, "")
-          |> ExMustache.tokenize()
+      {:partial, name, indent} ->
+        template = Map.fetch!(partials, name)
 
-        template =
+        if template do
+          rendered = ExMustache.render({template, partials}, data, context)
+
           if indent != "" do
-            {_, template} =
-              Enum.reduce(template, {true, []}, fn term, {newline?, acc} ->
-                acc =
-                  if newline? do
-                    [term | [indent | acc]]
-                  else
-                    [term | acc]
-                  end
-
-                newline? =
-                  case term do
-                    "\n" <> _ -> true
-                    _ -> false
-                  end
-
-                {newline?, acc}
-              end)
-
-            Enum.reverse(template)
+            case indent_lines([indent | rendered], indent) do
+              # trim indentation after last newline
+              [^indent | rendered] -> rendered
+              rendered -> rendered
+            end
+            |> Enum.reverse()
           else
-            template
+            rendered
           end
-
-        partial = template |> ExMustache.parse()
-
-        rendered =
-          ExMustache.render(partial, data, partials, context)
-          |> IO.iodata_to_binary()
+        else
+          ""
+        end
 
       {:unescape, var} ->
         fetch_value(data, var, context) |> serialize()
@@ -345,16 +375,35 @@ defmodule ExMustache do
     end
   end
 
+  defp indent_lines(io_data, indent, result \\ [])
+
+  defp indent_lines([], _indent, result), do: result
+
+  defp indent_lines([term | io_data], indent, result) when is_binary(term) do
+    result =
+      if is_binary(term) && String.ends_with?(term, "\n") do
+        [indent | [term | result]]
+      else
+        [term | result]
+      end
+
+    indent_lines(io_data, indent, result)
+  end
+
+  defp indent_lines([term | io_data], indent, result) when is_list(term) do
+    indent_lines(io_data, indent, indent_lines(term, indent, result))
+  end
+
   defp handle_block(keys, block, data, partials, context) do
     value = fetch_value(data, keys, context)
 
     case value do
-      value when is_map(value) -> render(block, value, partials, [data | context])
-      [_ | _] -> Enum.map(value, &render(block, &1, partials, [data | context]))
+      value when is_map(value) -> render({block, partials}, value, [data | context])
+      [_ | _] -> Enum.map(value, &render({block, partials}, &1, [data | context]))
       [] -> []
       false -> []
       nil -> []
-      _ -> render(block, data, partials, context)
+      _ -> render({block, partials}, data, context)
     end
   end
 
@@ -362,14 +411,14 @@ defmodule ExMustache do
     value = fetch_value(data, keys, context)
 
     case value do
-      [] -> render(block, data, partials, context)
-      false -> render(block, data, partials, context)
-      nil -> render(block, data, partials, context)
+      [] -> render({block, partials}, data, context)
+      false -> render({block, partials}, data, context)
+      nil -> render({block, partials}, data, context)
       _ -> []
     end
   end
 
-  defp fetch_value(data, ["."], context), do: data
+  defp fetch_value(data, ["."], _context), do: data
 
   defp fetch_value(data, keys, context) when is_map(data) do
     cond do
@@ -392,7 +441,7 @@ defmodule ExMustache do
       t when is_binary(t) -> t
       t when is_integer(t) -> to_string(t)
       t when is_number(t) -> to_string(t)
-      t -> ""
+      _t -> ""
     end
   end
 
@@ -407,9 +456,7 @@ defmodule ExMustache do
     html_escape(string, result <> <<c::utf8>>)
   end
 
-  # render
-
-  def render(template, data, partials, context) do
+  def render({template, partials}, data, context) do
     Enum.map(template, fn entity ->
       render_item(entity, data, partials, context)
     end)
