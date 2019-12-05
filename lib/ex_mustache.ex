@@ -1,28 +1,42 @@
 defmodule ExMustache do
+  defmodule TokenizeState do
+    defstruct [:match_pattern, :close_pattern]
+  end
+
   def tokenize(template) do
-    template = do_tokenize(template, [], {"{{", "}}"})
+    state = %TokenizeState{
+      match_pattern: :binary.compile_pattern(["\n", "{{"]),
+      close_pattern: :binary.compile_pattern(["}}"])
+    }
+
+    template = do_tokenize(template, [], state)
 
     Enum.reverse([:end | template])
     |> chomp_newlines()
   end
 
-  def do_tokenize(template, result, {start_tag, end_tag} = delimiters) do
-    case find_start(template, start_tag) do
+  def do_tokenize(template, result, state) do
+    case split_string(template, state.match_pattern) do
       {:newline, left, rest} ->
-        do_tokenize(rest, [:newline | append(left, result)], delimiters)
+        do_tokenize(rest, [:newline | append(left, result)], state)
 
       {:tag, left, rest} ->
-        case find_end(rest, end_tag) do
-          pos ->
+        case tag_close(rest, state.close_pattern) do
+          {pos, length} ->
             {interp, rest} = :erlang.split_binary(rest, pos)
-            rest = binary_part(rest, byte_size(end_tag), byte_size(rest) - byte_size(end_tag))
+            rest = binary_part(rest, length, byte_size(rest) - length)
 
             case tag(String.trim(interp)) do
-              {:delimiter, {start_tag, end_tag}} = tag ->
-                do_tokenize(rest, [tag | append(left, result)], {start_tag, end_tag})
+              {:delimiter, {start_delim, close_delim}} = tag ->
+                state = %TokenizeState{
+                  match_pattern: :binary.compile_pattern(["\n", start_delim]),
+                  close_pattern: :binary.compile_pattern([close_delim])
+                }
+
+                do_tokenize(rest, [tag | append(left, result)], state)
 
               tag ->
-                do_tokenize(rest, [tag | append(left, result)], delimiters)
+                do_tokenize(rest, [tag | append(left, result)], state)
             end
 
           :nomatch ->
@@ -34,36 +48,31 @@ defmodule ExMustache do
     end
   end
 
-  defp find_start(string, start_tag) do
-    with {pos, length} <- :binary.match(string, ["\n", start_tag]) do
+  defp split_string(string, pattern) do
+    with {pos, length} <- :binary.match(string, pattern) do
       if binary_part(string, pos, length) == "\n" do
         {left, "\n" <> rest} = :erlang.split_binary(string, pos)
         {:newline, left, rest}
       else
         {left, rest} = :erlang.split_binary(string, pos)
-
-        {:tag, left,
-         binary_part(rest, byte_size(start_tag), byte_size(rest) - byte_size(start_tag))}
+        {:tag, left, binary_part(rest, length, byte_size(rest) - length)}
       end
     end
   end
 
-  defp find_end(string, pattern, pos \\ 0)
-  defp find_end(<<>>, _pattern, pos), do: pos
+  defp tag_close(string, pattern) do
+    with {pos, length} <- :binary.match(string, pattern) do
+      index = pos + 1
+      rest = binary_part(string, index, byte_size(string) - index)
+      {pattern_occurrence(rest, pattern, pos), length}
+    end
+  end
 
-  defp find_end(<<_::utf8, rest::binary>> = string, pattern, pos) do
+  defp pattern_occurrence(<<_::utf8, rest::binary>> = string, pattern, index) do
     if String.starts_with?(string, pattern) do
-      if String.length(string) > String.length(pattern) do
-        if String.slice(string, 1, String.length(pattern)) != pattern do
-          pos
-        else
-          find_end(rest, pattern, pos + 1)
-        end
-      else
-        pos
-      end
+      pattern_occurrence(rest, pattern, index + 1)
     else
-      find_end(rest, pattern, pos + 1)
+      index
     end
   end
 
@@ -76,27 +85,27 @@ defmodule ExMustache do
       "!" <> field -> {:comment, field}
       "&" <> field -> {:unescape, split_to_keys(field)}
       "=" <> field -> {:delimiter, find_delimiters(field)}
-      "{" <> field -> {:unescape, triple_mustache_tag(String.trim(field), "}")}
+      "{" <> field -> {:unescape, triple_mustache_tag(field)}
       field when byte_size(field) > 0 -> {:variable, split_to_keys(field)}
       field -> raise("Invalid Tag: #{inspect(field)}")
     end
   end
 
-  @delimiter_regex ~r/[[:space:]]*(?<start_tag>[[:graph:]]+)[[:space:]]+(?<end_tag>[[:graph:]]+)[[:space:]]*=/
+  @delimiter_regex ~r/[[:space:]]*(?<start_delim>[[:graph:]]+)[[:space:]]+(?<close_delim>[[:graph:]]+)[[:space:]]*=/
 
   defp find_delimiters(field) do
     case Regex.named_captures(@delimiter_regex, field) do
-      %{"start_tag" => start_tag, "end_tag" => end_tag} ->
-        {start_tag, end_tag}
+      %{"start_delim" => start_delim, "close_delim" => close_delim} ->
+        {start_delim, close_delim}
 
       _ ->
         raise "Invalid tag delimiter: #{field}"
     end
   end
 
-  defp triple_mustache_tag(field, end_tag) do
-    if String.ends_with?(field, end_tag) do
-      String.slice(field, 0, String.length(field) - String.length(end_tag))
+  defp triple_mustache_tag(field) do
+    if String.ends_with?(field, "}") do
+      binary_part(field, 0, byte_size(field) - 1)
       |> String.trim()
       |> split_to_keys()
     else
