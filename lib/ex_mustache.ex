@@ -1,6 +1,6 @@
 defmodule ExMustache do
   defmodule TokenizeState do
-    defstruct [:match_pattern, :close_pattern, :partials, :result]
+    defstruct [:match_pattern, :close_pattern, :partials, :result, :line, :is_independent]
   end
 
   def parse(template) do
@@ -21,17 +21,6 @@ defmodule ExMustache do
     end
   end
 
-  defp deep_reverse(template, result \\ [])
-  defp deep_reverse([], result), do: result
-
-  defp deep_reverse([term | template], result) when is_list(term) do
-    deep_reverse(template, [deep_reverse(term) | result])
-  end
-
-  defp deep_reverse([term | template], result) do
-    deep_reverse(template, [term | result])
-  end
-
   defp read_template_file(name, _dir) do
     case File.read(name <> ".mustache") do
       {:ok, content} -> content
@@ -44,14 +33,15 @@ defmodule ExMustache do
       match_pattern: :binary.compile_pattern(["\n", "{{"]),
       close_pattern: :binary.compile_pattern(["}}"]),
       result: [],
-      partials: MapSet.new()
+      partials: MapSet.new(),
+      line: [],
+      is_independent: {true, nil}
     }
 
     %TokenizeState{result: template, partials: partials} = tokenize(template, state)
 
     template =
-      Enum.reverse([:end | template])
-      |> chomp_newlines()
+      Enum.reverse(template)
       |> dispatch([], [])
 
     {template, partials}
@@ -60,7 +50,11 @@ defmodule ExMustache do
   defp tokenize(template, state) do
     case split_string(template, state.match_pattern) do
       {:newline, left, rest} ->
-        tokenize(rest, %TokenizeState{state | result: [:newline | append(left, state.result)]})
+        state =
+          buffer_line(state, left <> "\n")
+          |> dispatch_eol()
+
+        tokenize(rest, state)
 
       {:tag, left, rest} ->
         case tag_close(rest, state.close_pattern) do
@@ -78,25 +72,74 @@ defmodule ExMustache do
                       close_pattern: :binary.compile_pattern([close_delim])
                   }
 
-                {:partial, name} ->
+                {:partial, name, ""} ->
                   %TokenizeState{state | partials: MapSet.put(state.partials, name)}
 
                 _ ->
                   state
               end
 
-            tokenize(
-              rest,
-              %TokenizeState{state | result: [tag | append(left, state.result)]}
-            )
+            tokenize(rest, buffer_line(state, left, tag))
 
           :nomatch ->
             raise "Parsing Error. missing END tag. left: #{left} template: #{template}"
         end
 
       :nomatch ->
-        %TokenizeState{state | result: append(template, state.result)}
+        buffer_line(state, template)
+        |> dispatch_eol()
     end
+  end
+
+  defp dispatch_eol(state) do
+    if state.is_independent == {true, true} do
+      line =
+        if independent_partial?(state.line) do
+          update_partial(Enum.reverse(state.line))
+        else
+          state.line
+        end
+        |> cleanup_line()
+
+      %TokenizeState{state | line: line}
+    else
+      state
+    end
+    |> push_to_result()
+  end
+
+  defp buffer_line(%TokenizeState{} = state, ""), do: state
+
+  defp buffer_line(%TokenizeState{} = state, item) do
+    {empty_line, only_independent_tags} = state.is_independent
+
+    is_independent =
+      cond do
+        empty_line == false || only_independent_tags == false ->
+          {empty_line, only_independent_tags}
+
+        is_binary(item) && !is_whitespace(item) ->
+          {false, only_independent_tags}
+
+        is_tuple(item) && elem(item, 0) in [:variable, :unescape] ->
+          {empty_line, false}
+
+        is_tuple(item) ->
+          {empty_line, true}
+
+        true ->
+          {empty_line, only_independent_tags}
+      end
+
+    %TokenizeState{state | line: [item | state.line], is_independent: is_independent}
+  end
+
+  defp buffer_line(%TokenizeState{} = state, item1, item2) do
+    buffer_line(buffer_line(state, item1), item2)
+  end
+
+  defp push_to_result(%TokenizeState{line: line, result: result} = state) do
+    %TokenizeState{state | line: [], is_independent: {true, nil}, result: line ++ result}
   end
 
   defp split_string(string, pattern) do
@@ -132,7 +175,7 @@ defmodule ExMustache do
       "#" <> field -> {:block, split_to_keys(field)}
       "^" <> field -> {:neg_block, split_to_keys(field)}
       "/" <> field -> {:block_close, split_to_keys(field)}
-      ">" <> field -> {:partial, String.trim(field)}
+      ">" <> field -> {:partial, String.trim(field), ""}
       "!" <> field -> {:comment, field}
       "&" <> field -> {:unescape, split_to_keys(field)}
       "=" <> field -> {:delimiter, find_delimiters(field)}
@@ -164,13 +207,6 @@ defmodule ExMustache do
     end
   end
 
-  defp append(str, result) do
-    case str do
-      "" -> result
-      str -> [str | result]
-    end
-  end
-
   defp split_to_keys("."), do: ["."]
 
   defp split_to_keys(field) do
@@ -178,82 +214,8 @@ defmodule ExMustache do
     |> String.split(".")
   end
 
-  defp chomp_newlines(template) do
-    {[], true, result} =
-      Enum.reduce(
-        template,
-        {[], true, []},
-        fn term, {line, independent, result} ->
-          case term do
-            :newline ->
-              if independent && !Enum.empty?(line) do
-                line =
-                  if independent_partial?(line) do
-                    reverse(line)
-                    |> update_partial()
-                    |> cleanup_line()
-                  else
-                    reverse(line)
-                    |> cleanup_line()
-                  end
-
-                {[], true, [line | result]}
-              else
-                {[], true, [reverse(["\n" | line]) | result]}
-              end
-
-            :end ->
-              if independent && !Enum.empty?(line) do
-                line =
-                  if independent_partial?(line) do
-                    reverse(line)
-                    |> update_partial()
-                    |> cleanup_line()
-                  else
-                    reverse(line)
-                    |> cleanup_line()
-                  end
-
-                {[], true, [line | result]}
-              else
-                {[], true, [reverse(line) | result]}
-              end
-
-            term when is_binary(term) ->
-              if String.trim(term) == "" do
-                {[term | line], independent, result}
-              else
-                {[term | line], false, result}
-              end
-
-            {:variable, _} = term ->
-              {[term | line], false, result}
-
-            {:partial, field} ->
-              {[{:partial, field, ""} | line], independent, result}
-
-            {:unescape, _} = term ->
-              {[term | line], false, result}
-
-            term ->
-              {[term | line], independent, result}
-          end
-        end
-      )
-
-    Enum.reverse(result)
-    |> Enum.flat_map(& &1)
-  end
-
   defp independent_partial?(line) do
-    partial_tags =
-      Enum.filter(line, fn
-        {:partial, _, _} -> true
-        _ -> false
-      end)
-      |> Enum.count()
-
-    partial_tags == 1
+    Enum.count(line, &match?({:partial, _, _}, &1)) == 1
   end
 
   defp update_partial(line) do
@@ -268,8 +230,6 @@ defmodule ExMustache do
     end)
     |> Enum.reverse()
   end
-
-  defp reverse(line), do: Enum.reverse(line)
 
   defp cleanup_line(line) do
     Enum.reject(line, &is_binary/1)
@@ -290,6 +250,24 @@ defmodule ExMustache do
         [item | acc]
     end)
   end
+
+  defp deep_reverse(template, result \\ [])
+  defp deep_reverse([], result), do: result
+
+  defp deep_reverse([term | template], result) when is_list(term) do
+    deep_reverse(template, [deep_reverse(term) | result])
+  end
+
+  defp deep_reverse([term | template], result) do
+    deep_reverse(template, [term | result])
+  end
+
+  defp is_whitespace(<<>>), do: true
+  defp is_whitespace("\r" <> rest), do: is_whitespace(rest)
+  defp is_whitespace("\n" <> rest), do: is_whitespace(rest)
+  defp is_whitespace("\t" <> rest), do: is_whitespace(rest)
+  defp is_whitespace(" " <> rest), do: is_whitespace(rest)
+  defp is_whitespace(_), do: false
 
   # parser
   defp dispatch([], acc, _context), do: acc
@@ -331,8 +309,6 @@ defmodule ExMustache do
   defp dispatch([{:partial, field, indent} | template], acc, context) do
     dispatch(template, [{:partial, field, indent} | acc], context)
   end
-
-  # template function
 
   defp render_item(item, data, partials, context) do
     case item do
