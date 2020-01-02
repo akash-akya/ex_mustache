@@ -236,19 +236,28 @@ defmodule ExMustache do
   end
 
   defp merge_strings(template) do
-    Enum.reduce(template, [], fn
-      item, [prev | acc] when is_binary(item) and is_binary(prev) ->
-        [item <> prev | acc]
+    {strings, acc} =
+      Enum.reduce(template, {[], []}, fn
+        item, {strings, acc} when is_binary(item) ->
+          {[item | strings], acc}
 
-      {:block, field}, acc ->
-        [{:block, merge_strings(field)} | acc]
+        item, {strings, acc} ->
+          acc =
+            case item do
+              {:block, field} ->
+                [{:block, merge_strings(field)} | [IO.iodata_to_binary(strings) | acc]]
 
-      {:neg_block, field}, acc ->
-        [{:neg_block, merge_strings(field)} | acc]
+              {:neg_block, field} ->
+                [{:neg_block, merge_strings(field)} | [IO.iodata_to_binary(strings) | acc]]
 
-      item, acc ->
-        [item | acc]
-    end)
+              item ->
+                [item | [IO.iodata_to_binary(strings) | acc]]
+            end
+
+          {[], acc}
+      end)
+
+    [IO.iodata_to_binary(strings) | acc]
   end
 
   defp deep_reverse(template, result \\ [])
