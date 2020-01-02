@@ -3,6 +3,10 @@ defmodule ExMustache do
     defstruct [:match_pattern, :close_pattern, :partials, :result, :line, :is_independent]
   end
 
+  defmodule ExMustache.ParserError do
+    defexception [:message]
+  end
+
   def parse(template) do
     {template, partials} = parse_template(template)
     {merge_strings(template), parse_partials(MapSet.to_list(partials), ".")}
@@ -42,7 +46,7 @@ defmodule ExMustache do
 
     template =
       Enum.reverse(template)
-      |> dispatch([], [])
+      |> compile([], [])
 
     {template, partials}
   end
@@ -52,7 +56,7 @@ defmodule ExMustache do
       {:newline, left, rest} ->
         state =
           buffer_line(state, left <> "\n")
-          |> dispatch_eol()
+          |> collect_line()
 
         tokenize(rest, state)
 
@@ -82,16 +86,16 @@ defmodule ExMustache do
             tokenize(rest, buffer_line(state, left, tag))
 
           :nomatch ->
-            raise "Parsing Error. missing END tag. left: #{left} template: #{template}"
+            raise ExMustache.ParserError, message: "missing closing tag"
         end
 
       :nomatch ->
         buffer_line(state, template)
-        |> dispatch_eol()
+        |> collect_line()
     end
   end
 
-  defp dispatch_eol(state) do
+  defp collect_line(state) do
     if state.is_independent == {true, true} do
       line =
         if independent_partial?(state.line) do
@@ -158,13 +162,13 @@ defmodule ExMustache do
     with {pos, length} <- :binary.match(string, pattern) do
       index = pos + 1
       rest = binary_part(string, index, byte_size(string) - index)
-      {pattern_occurrence(rest, pattern, pos), length}
+      {match_repeated(rest, pattern, pos), length}
     end
   end
 
-  defp pattern_occurrence(<<_::utf8, rest::binary>> = string, pattern, index) do
+  defp match_repeated(<<_::utf8, rest::binary>> = string, pattern, index) do
     if String.starts_with?(string, pattern) do
-      pattern_occurrence(rest, pattern, index + 1)
+      match_repeated(rest, pattern, index + 1)
     else
       index
     end
@@ -181,19 +185,18 @@ defmodule ExMustache do
       "=" <> field -> {:delimiter, find_delimiters(field)}
       "{" <> field -> {:unescape, triple_mustache_tag(field)}
       field when byte_size(field) > 0 -> {:variable, split_to_keys(field)}
-      field -> raise("Invalid Tag: #{inspect(field)}")
+      field -> raise ExMustache.ParserError, message: "Invalid tag: #{field}"
     end
   end
 
   @delimiter_regex ~r/[[:space:]]*(?<start_delim>[[:graph:]]+)[[:space:]]+(?<close_delim>[[:graph:]]+)[[:space:]]*=/
-
   defp find_delimiters(field) do
     case Regex.named_captures(@delimiter_regex, field) do
       %{"start_delim" => start_delim, "close_delim" => close_delim} ->
         {start_delim, close_delim}
 
       _ ->
-        raise "Invalid tag delimiter: #{field}"
+        raise ExMustache.ParserError, message: "invalid delimiters tag: =#{field}"
     end
   end
 
@@ -203,7 +206,7 @@ defmodule ExMustache do
       |> String.trim()
       |> split_to_keys()
     else
-      raise "unescape tag is not balanced"
+      raise ExMustache.ParserError, message: "invalid triple mustache tag: {#{field}"
     end
   end
 
@@ -278,54 +281,52 @@ defmodule ExMustache do
   defp is_whitespace(" " <> rest), do: is_whitespace(rest)
   defp is_whitespace(_), do: false
 
-  # parser
-  defp dispatch([], acc, _context), do: acc
+  defp compile(tokens, context, result) do
+    case tokens do
+      [] ->
+        result
 
-  defp dispatch([term | template], acc, context) when is_binary(term) do
-    dispatch(template, [term | acc], context)
+      [term | template] when is_binary(term) ->
+        compile(template, context, [term | result])
+
+      [{:variable, field} | template] ->
+        compile(template, context, [{:variable, field} | result])
+
+      [{:unescape, field} | template] ->
+        compile(template, context, [{:unescape, field} | result])
+
+      [{:block, field} | template] ->
+        {block, rest} = compile(template, [field | context], [])
+        compile(rest, context, [{:block, field, Enum.reverse(block)} | result])
+
+      [{:neg_block, field} | template] ->
+        {block, rest} = compile(template, [field | context], [])
+        compile(rest, context, [{:neg_block, field, Enum.reverse(block)} | result])
+
+      [{:block_close, field} | template] ->
+        {result, template}
+
+      [{:comment, _field} | template] ->
+        compile(template, context, result)
+
+      [{:delimiter, _field} | template] ->
+        compile(template, context, result)
+
+      [{:partial, field, indent} | template] ->
+        compile(template, context, [{:partial, field, indent} | result])
+    end
   end
 
-  defp dispatch([{:variable, field} | template], acc, context) do
-    dispatch(template, [{:variable, field} | acc], context)
-  end
+  defp render_tag(term, data, partials, context) do
+    case term do
+      term when is_binary(term) ->
+        term
 
-  defp dispatch([{:unescape, field} | template], acc, context) do
-    dispatch(template, [{:unescape, field} | acc], context)
-  end
-
-  defp dispatch([{:block, field} | template], acc, context) do
-    {block, rest} = dispatch(template, [], [field | context])
-    dispatch(rest, [{:block, field, Enum.reverse(block)} | acc], context)
-  end
-
-  defp dispatch([{:neg_block, field} | template], acc, context) do
-    {block, rest} = dispatch(template, [], [field | context])
-    dispatch(rest, [{:neg_block, field, Enum.reverse(block)} | acc], context)
-  end
-
-  defp dispatch([{:block_close, field} | template], acc, [field | _context]) do
-    {acc, template}
-  end
-
-  defp dispatch([{:comment, _field} | template], acc, context) do
-    dispatch(template, acc, context)
-  end
-
-  defp dispatch([{:delimiter, _field} | template], acc, context) do
-    dispatch(template, acc, context)
-  end
-
-  defp dispatch([{:partial, field, indent} | template], acc, context) do
-    dispatch(template, [{:partial, field, indent} | acc], context)
-  end
-
-  defp render_item(item, data, partials, context) do
-    case item do
       {:block, var, block} ->
-        handle_block(var, block, data, partials, context)
+        render_block(var, block, data, partials, context)
 
       {:neg_block, var, block} ->
-        handle_neg_block(var, block, data, partials, context)
+        render_neg_block(var, block, data, partials, context)
 
       {:variable, var} ->
         fetch_value(data, var, context)
@@ -336,7 +337,7 @@ defmodule ExMustache do
         template = Map.fetch!(partials, name)
 
         if template do
-          rendered = ExMustache.render({template, partials}, data, context)
+          rendered = render({template, partials}, data, context)
 
           if indent != "" do
             case indent_lines([indent | rendered], indent) do
@@ -354,9 +355,6 @@ defmodule ExMustache do
 
       {:unescape, var} ->
         fetch_value(data, var, context) |> serialize()
-
-      term when is_binary(term) ->
-        term
     end
   end
 
@@ -366,7 +364,7 @@ defmodule ExMustache do
 
   defp indent_lines([term | io_data], indent, result) when is_binary(term) do
     result =
-      if is_binary(term) && String.ends_with?(term, "\n") do
+      if String.ends_with?(term, "\n") do
         [indent | [term | result]]
       else
         [term | result]
@@ -379,7 +377,7 @@ defmodule ExMustache do
     indent_lines(io_data, indent, indent_lines(term, indent, result))
   end
 
-  defp handle_block(keys, block, data, partials, context) do
+  defp render_block(keys, block, data, partials, context) do
     value = fetch_value(data, keys, context)
 
     case value do
@@ -392,7 +390,7 @@ defmodule ExMustache do
     end
   end
 
-  defp handle_neg_block(keys, block, data, partials, context) do
+  defp render_neg_block(keys, block, data, partials, context) do
     value = fetch_value(data, keys, context)
 
     case value do
@@ -411,7 +409,6 @@ defmodule ExMustache do
         get_in(data, keys)
 
       Enum.empty?(context) ->
-        # raise "Value not found #{inspect(binding())}"
         nil
 
       true ->
@@ -442,8 +439,8 @@ defmodule ExMustache do
   end
 
   def render({template, partials}, data, context) do
-    Enum.map(template, fn entity ->
-      render_item(entity, data, partials, context)
+    Enum.map(template, fn term ->
+      render_tag(term, data, partials, context)
     end)
   end
 end
