@@ -1,15 +1,35 @@
 defmodule ExMustache do
-  defmodule TokenizeState do
-    defstruct [:match_pattern, :close_pattern, :partials, :result, :line, :is_independent]
-  end
+  @moduledoc ~S"""
+  ExMustache is fast mustache templating engine.
 
-  defmodule ExMustache.ParserError do
+  ExMustache supports everything except lambda from mustache spec.
+  """
+
+  defmodule ParserError do
     defexception [:message]
   end
 
-  def parse(template) do
+  @type t :: %ExMustache{template: any(), partials: map()}
+  defstruct [:template, :partials]
+
+  @spec parse(String.t(), keyword()) :: t()
+  def parse(template, opts \\ []) do
     {template, partials} = parse_template(template)
-    {merge_strings(template), parse_partials(MapSet.to_list(partials), ".")}
+
+    %ExMustache{
+      template: merge_strings(template),
+      partials: parse_partials(MapSet.to_list(partials), Keyword.get(opts, :dir, "."))
+    }
+  end
+
+  @spec parse(t(), map()) :: t()
+  def render(%ExMustache{template: template, partials: partials}, data),
+    do: do_render(template, partials, data, [])
+
+  defp do_render(template, partials, data, context) do
+    Enum.map(template, fn term ->
+      render_tag(term, data, partials, context)
+    end)
   end
 
   defp parse_partials(partials, path, parsed \\ %{})
@@ -25,11 +45,15 @@ defmodule ExMustache do
     end
   end
 
-  defp read_template_file(name, _dir) do
-    case File.read(name <> ".mustache") do
+  defp read_template_file(name, dir) do
+    case File.read(Path.join(dir, name <> ".mustache")) do
       {:ok, content} -> content
       {:error, :enoent} -> ""
     end
+  end
+
+  defmodule TokenizeState do
+    defstruct [:match_pattern, :close_pattern, :partials, :result, :line, :is_independent]
   end
 
   defp parse_template(template) do
@@ -303,7 +327,7 @@ defmodule ExMustache do
         {block, rest} = compile(template, [field | context], [])
         compile(rest, context, [{:neg_block, field, Enum.reverse(block)} | result])
 
-      [{:block_close, field} | template] ->
+      [{:block_close, _field} | template] ->
         {result, template}
 
       [{:comment, _field} | template] ->
@@ -337,7 +361,7 @@ defmodule ExMustache do
         template = Map.fetch!(partials, name)
 
         if template do
-          rendered = render({template, partials}, data, context)
+          rendered = do_render(template, partials, data, context)
 
           if indent != "" do
             case indent_lines([indent | rendered], indent) do
@@ -381,12 +405,12 @@ defmodule ExMustache do
     value = fetch_value(data, keys, context)
 
     case value do
-      value when is_map(value) -> render({block, partials}, value, [data | context])
-      [_ | _] -> Enum.map(value, &render({block, partials}, &1, [data | context]))
+      value when is_map(value) -> do_render(block, partials, value, [data | context])
+      [_ | _] -> Enum.map(value, &do_render(block, partials, &1, [data | context]))
       [] -> []
       false -> []
       nil -> []
-      _ -> render({block, partials}, data, context)
+      _ -> do_render(block, partials, data, context)
     end
   end
 
@@ -394,9 +418,9 @@ defmodule ExMustache do
     value = fetch_value(data, keys, context)
 
     case value do
-      [] -> render({block, partials}, data, context)
-      false -> render({block, partials}, data, context)
-      nil -> render({block, partials}, data, context)
+      [] -> do_render(block, partials, data, context)
+      false -> do_render(block, partials, data, context)
+      nil -> do_render(block, partials, data, context)
       _ -> []
     end
   end
@@ -436,11 +460,5 @@ defmodule ExMustache do
 
   defp html_escape(<<c::utf8>> <> string, result) do
     html_escape(string, result <> <<c::utf8>>)
-  end
-
-  def render({template, partials}, data, context) do
-    Enum.map(template, fn term ->
-      render_tag(term, data, partials, context)
-    end)
   end
 end

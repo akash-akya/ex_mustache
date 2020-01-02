@@ -45,7 +45,7 @@ defmodule ExMustache.SpecTest do
 
     result =
       ExMustache.parse(test["template"])
-      |> ExMustache.render(test["data"], [])
+      |> ExMustache.render(test["data"])
       |> IO.iodata_to_binary()
 
     assert test["expected"] == result
