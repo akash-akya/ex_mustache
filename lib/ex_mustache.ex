@@ -1,6 +1,6 @@
 defmodule ExMustache do
   @moduledoc ~S"""
-  ExMustache is fast mustache templating engine.
+  ExMustache is a fast mustache templating library for Elixir.
 
   ExMustache supports everything except lambda from mustache spec.
   """
@@ -12,6 +12,12 @@ defmodule ExMustache do
   @type t :: %ExMustache{template: any(), partials: map()}
   defstruct [:template, :partials]
 
+  @doc """
+  Parse the binary and create template which can be used to render
+
+  ## Options
+    * `:dir` - directory where partial templates are located.
+  """
   @spec parse(String.t(), keyword()) :: t()
   def parse(template, opts \\ []) do
     {template, partials} = parse_template(template)
@@ -23,9 +29,14 @@ defmodule ExMustache do
     }
   end
 
-  @spec parse(t(), map()) :: t()
-  def render(%ExMustache{template: template, partials: partials}, data),
-    do: do_render(template, partials, data, [])
+  @doc """
+  Renders template by interpolating map data. Map keys *must* be string type.
+
+  Returns [iodata](https://hexdocs.pm/elixir/IO.html#module-io-data).
+  """
+  @spec render(t(), map()) :: iodata()
+  def render(%ExMustache{template: template, partials: partials}, map),
+    do: do_render(template, partials, map, [])
 
   defp do_render(template, partials, data, context) do
     Enum.map(template, fn term ->
