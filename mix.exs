@@ -21,6 +21,8 @@ defmodule ExMustache.MixProject do
     [
       {:bbmustache, "~> 1.4.0", only: [:dev, :test]},
       {:yaml_elixir, "~> 1.0", only: [:test]},
+      {:benchee, "~> 1.0", only: :dev},
+      {:poison, "~> 3.0.0", only: :dev},
       {:temp, "~> 0.4", only: :test}
     ]
   end

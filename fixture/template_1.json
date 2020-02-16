@@ -1,0 +1,35 @@
+{
+  "name": "Random Corp",
+  "report_date": "14 May 2019",
+  "year": "2019",
+  "reports": [
+    {
+      "id": "A0001",
+      "name": "User 1",
+      "formatted_gross_amount": "$ 12,000",
+      "count": 4
+    },
+    {
+      "id": "A0002",
+      "name": "User 2",
+      "formatted_gross_amount": "$ 13,000",
+      "count": 12
+    },
+    {
+      "id": "A0003",
+      "formatted_gross_amount": "$ 14,000",
+      "count": 34
+    },
+    {
+      "id": "A0004",
+      "formatted_gross_amount": "$ 15,000",
+      "count": 22
+    },
+    {
+      "id": "A0005",
+      "formatted_gross_amount": "$ 16,000",
+      "count": 34
+    }
+  ],
+  "download_url": "http://google.com/report.csv"
+}
