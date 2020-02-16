@@ -15,6 +15,7 @@ defmodule ExMustache do
   @spec parse(String.t(), keyword()) :: t()
   def parse(template, opts \\ []) do
     {template, partials} = parse_template(template)
+    template = deep_reverse(template)
 
     %ExMustache{
       template: merge_strings(template),
@@ -269,22 +270,20 @@ defmodule ExMustache do
           {[item | strings], acc}
 
         item, {strings, acc} ->
+          merged = [IO.iodata_to_binary(Enum.reverse(strings)) | acc]
+
           acc =
             case item do
-              {:block, field} ->
-                [{:block, merge_strings(field)} | [IO.iodata_to_binary(strings) | acc]]
-
-              {:neg_block, field} ->
-                [{:neg_block, merge_strings(field)} | [IO.iodata_to_binary(strings) | acc]]
-
-              item ->
-                [item | [IO.iodata_to_binary(strings) | acc]]
+              {:block, fields, block} -> [{:block, fields, merge_strings(block)} | merged]
+              {:neg_block, fields, block} -> [{:neg_block, fields, merge_strings(block)} | merged]
+              item -> [item | merged]
             end
 
           {[], acc}
       end)
 
-    [IO.iodata_to_binary(strings) | acc]
+    [IO.iodata_to_binary(Enum.reverse(strings)) | acc]
+    |> Enum.reverse()
   end
 
   defp deep_reverse(template, result \\ [])
