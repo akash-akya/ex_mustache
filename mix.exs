@@ -43,10 +43,10 @@ defmodule ExMustache.MixProject do
 
   defp deps do
     [
-      {:bbmustache, "~> 1.4.0", only: [:dev, :test]},
-      {:yaml_elixir, "~> 1.0", only: [:test]},
+      {:bbmustache, "~> 1.4", only: [:dev, :test]},
+      {:yaml_elixir, "~> 2.0", only: [:test]},
       {:benchee, "~> 1.0", only: :dev},
-      {:poison, "~> 3.0.0", only: :dev},
+      {:poison, "~> 5.0", only: :dev},
       {:temp, "~> 0.4", only: :test},
       {:ex_doc, ">= 0.0.0", only: :dev}
     ]
