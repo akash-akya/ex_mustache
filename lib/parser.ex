@@ -171,10 +171,12 @@ defmodule ExMustache.Parser do
   end
 
   defp match_repeated(<<_::utf8, rest::binary>> = string, pattern, index) do
-    if String.starts_with?(string, pattern) do
-      match_repeated(rest, pattern, index + 1)
-    else
-      index
+    case :binary.match(string, pattern) do
+      {0, _} ->
+        match_repeated(rest, pattern, index + 1)
+
+      _ ->
+        index
     end
   end
 
